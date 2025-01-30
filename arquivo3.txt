@@ -1,4 +1,0 @@
-Esta é uma linha de exemplo.
-Outra linha sem a palavra.
-Outra linha sem a palavra.
-Esta linha contém a palavra: chave.
