@@ -2,101 +2,146 @@
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <unistd.h>
 
-#define ESQUERDA 0
-#define DIREITA 1
+#define DIREITA 0
+#define ESQUERDA 1
+#define CAPACIDADE 10 // Maximo de veiculos no mesmo sentido
 
-int capacidade = 0; // Capacidade da ponte
-int ocupacao = 0; // Ocupacao atual da ponte
-int sentido_atual = -1; // Indica o sentido da via (0 ou 1)
-int esperando[2] = {0, 0}; // Numero de veiculos esperando em cada sentido
+typedef enum{
+    DIR = DIREITA,
+    ESQ = ESQUERDA
+} Direcao;
 
-// Mutex e variavel de condicao
+// Struct para controle de estado da ponte
+typedef struct{
+    int ocupacao;
+    Direcao sentido_atual;
+    int esperando[2];
+} Ponte;
+
+// Variaveis globais
+Ponte ponte = {
+    .sentido_atual = -1,
+    .ocupacao = 0,
+    .esperando = {0, 0}
+};
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t condicao = PTHREAD_COND_INITIALIZER;
+pthread_cond_t cond_direita = PTHREAD_COND_INITIALIZER; 
+pthread_cond_t cond_esquerda = PTHREAD_COND_INITIALIZER;
 
+
+// Funcoes e threads
 void *carro(void *threadid);
+int pode_entrar(Direcao sentido);
 
 int main(){
-    int veiculos;   // Numero de threads
-    int retorno = 0;    // Recebe o codigo de retorno
-    // Obtem os dados 
-    printf("Indique a capacidade da ponte: \n");
-    scanf(" %d", &capacidade);
-    printf("Indique a quantidade de veiculos: \n");
-    scanf(" %d", &veiculos);
-    
-    srand(time(0)); // Inicia a funcao aleatoria
+    int veiculos;
 
-    pthread_t threads[veiculos]; // Armazena os identificadores das threads
-    int *taskids[veiculos]; // Armazena os IDs das threads
-    int t, u; // Variaveis de loop
+    printf("Quantidade de veiculos: \n");
+    scanf("%d", &veiculos);
 
-    // Cria as threads
-    for(t=0; t<veiculos; t++){
-        printf("Na Main: criando veiculo %d\n", t);
-        taskids[t] = (int *)malloc(sizeof(int));
+    srand(time(0));
+    pthread_t threads[veiculos];
+    int *taskids[veiculos];
+    int rc; // Recebe o codigo de retorno
+    int t, u; // variaveis de loop
+    // Cria Threads (veiculos)
+    for(t=0; t < veiculos; t++){
+        printf("Na main: criando veiculo %d\n", t);
+        taskids[t] = (int *) malloc(sizeof(int));
         *taskids[t] = t;
-        retorno = pthread_create(&threads[t], NULL, carro, (void *) taskids[t]);
-        if (retorno){
-            printf("ERRO; código de retorno é %d\n", retorno);         
-            exit(-1);      
-        } 
+        rc = pthread_create(&threads[t], NULL, carro, (void *) taskids[t]);
+        if(rc){
+            printf("ERRO: codigo de rotorno eh %d\n", rc);
+            exit(-1);
+        }
     }
-    for(u = 0; u<veiculos; u++){
+
+    //Espera a conclusao
+    for(u=0; u<veiculos; u++){
         pthread_join(threads[u], NULL);
     }
 
+    // Destroi recursos de sincronizacao
     pthread_mutex_destroy(&mutex);
-    pthread_cond_destroy(&condicao);
+    pthread_cond_destroy(&cond_direita);
+    pthread_cond_destroy(&cond_esquerda);
 
     return 0;
 }
 
+// Verifica se um carro pode entrar na ponte
+int pode_entrar(Direcao sentido){
+    if((ponte.ocupacao < CAPACIDADE) && (ponte.sentido_atual == -1 || ponte.sentido_atual == sentido))
+        return 1;
+    else
+        return 0;
+}
+
+// Logica do veiculo
 void *carro(void *threadid){
     int tid = *((int *) threadid);
-    int direcao = rand() % 2; // Define a direcao aleatoreamente
+    Direcao dir = rand() %2; // Direcao aleatoria
 
-    pthread_mutex_lock(&mutex);
+    pthread_mutex_lock(&mutex); // Entra na regiao critica
+    ponte.esperando[dir]++; // Registra na fila de espera
 
-    // Comeca a esperar se nao pode entrar na ponte
-    esperando[direcao]++; // Incrementa a fila de espera do sentido
-    while(ocupacao >= capacidade || (ocupacao >0 && sentido_atual != direcao)){
-        pthread_cond_wait(&condicao, &mutex); // Coloca a thread para esperar
-    }
-    esperando[direcao]--;
-
-    // Entra na ponte
-    ocupacao++;
-    sentido_atual = direcao;
-    printf("Carro %d entrou na ponte no sentido %s. Ocupacao: %d\n",
-            tid, direcao == ESQUERDA? "para Esquerda" : "para Direita", ocupacao);
-
-    pthread_mutex_unlock(&mutex);
-
-    // Simula o tempo de travessia
-    int passando;
-    for(passando = 0; passando < 100; passando++);
-
-    pthread_mutex_lock(&mutex);
-
-    //Sair da ponte
-    ocupacao--;
-    printf("Carro %d saiu da ponte. Ocupacao: %d\n", tid, ocupacao);
-
-    // Verifica se eh preciso alterar o sentido
-    if(ocupacao == 0){
-        if(esperando[1 - sentido_atual] > 0){
-            sentido_atual = 1 - sentido_atual; // alterna o sentido
+    // Aguarda ate poder entrar
+    while(pode_entrar(dir) == 0){
+        if(dir == ESQ){
+            pthread_cond_wait(&cond_esquerda, &mutex);
         }
-        else if( esperando[sentido_atual] == 0){
-            sentido_atual = -1; // Ponte vazia, sem sentido especifico
+        else{
+            pthread_cond_wait(&cond_direita, &mutex);
         }
     }
 
-    pthread_cond_broadcast(&condicao);
-    pthread_mutex_unlock(&mutex);
+    // Atualiza o estado da ponte
+    ponte.esperando[dir]--;
+    ponte.ocupacao++;
+    if(ponte.sentido_atual == -1){
+        ponte.sentido_atual = dir; // Primeiro carro define o sentido
+    }
 
+    printf("Carro %d ENTROU (sentido: %s). Ocupacao: %d\n", tid, (dir == ESQ)? "ESQUERDA":"DIREITA", ponte.ocupacao);
+
+    pthread_mutex_unlock(&mutex); // Sai da regiao critica
+
+    // Simula a travessia
+    usleep(100000);
+
+    pthread_mutex_lock(&mutex); // Volta para a regiao critica
+    ponte.ocupacao--;
+
+    printf("Carro %d SAIU. Ocupacao restante: %d\n", tid, ponte.ocupacao);
+
+    // Logica de alternancia de sentido
+    if(ponte.ocupacao == 0){
+        if(ponte.esperando[DIR] > ponte.esperando[ESQ]){
+            ponte.sentido_atual = DIR;
+            pthread_cond_broadcast(&cond_direita); // Acorda todos do novo sentido
+        }
+        else if(ponte.esperando[ESQ] > ponte.esperando[DIR]){
+            ponte.sentido_atual = ESQ;
+            pthread_cond_broadcast(&cond_esquerda);
+        }
+        else{
+            ponte.sentido_atual = -1; // Ponte vazia
+        }
+    }
+    else{
+        // Notifica apenas um carro do mesmo sentido
+        if(ponte.sentido_atual == ESQ){
+            pthread_cond_signal(&cond_esquerda);
+        }
+        else{
+            pthread_cond_signal(&cond_direita);
+        }
+    }
+
+    pthread_mutex_unlock(&mutex); // sai da regiao critica
     free(threadid);
-    pthread_exit(NULL);
+    pthread_exit(NULL); // Encerra a thread
+
 }
